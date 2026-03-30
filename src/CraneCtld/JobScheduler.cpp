@@ -1466,6 +1466,11 @@ void JobScheduler::StepScheduleThread_() {
           auto rn_iter = m_running_job_map_.find(job_id);
           if (rn_iter != m_running_job_map_.end()) {
             auto& job = rn_iter->second;
+            // Skip scheduling for suspended jobs. Pending steps remain
+            // in the queue and will be scheduled once the job is resumed.
+            if (job->Status() == crane::grpc::Suspended) {
+              continue;
+            }
             auto popped_cnt = job->SchedulePendingSteps(&scheduled_steps);
             if ((m_job_pending_step_num_map_[job_id] -= popped_cnt) == 0) {
               jobs_to_remove.push_back(job_id);
@@ -1587,6 +1592,365 @@ std::future<CraneErrCode> JobScheduler::HoldReleaseJobAsync(job_id_t job_id,
   m_job_timeout_async_handle_->send();
 
   return std::move(future);
+}
+
+std::vector<CraneErrCode> JobScheduler::SuspendRunningJobs(
+    const std::vector<task_id_t>& job_ids) {
+  std::vector<CraneErrCode> results;
+  results.reserve(job_ids.size());
+  for (task_id_t job_id : job_ids) {
+    std::vector<CranedId> executing_nodes;
+
+    auto persist_status = [&](crane::grpc::JobStatus status,
+                              const char* failure_reason) {
+      LockGuard running_guard(&m_running_job_map_mtx_);
+      auto iter = m_running_job_map_.find(job_id);
+      if (iter == m_running_job_map_.end()) {
+        CRANE_WARN("Job #{} disappeared while persisting status {} during {}",
+                   job_id, static_cast<int>(status), failure_reason);
+        return false;
+      }
+
+      JobInCtld* job = iter->second.get();
+      auto prev_status = job->Status();
+      if (prev_status == status) return true;
+
+      job->SetStatus(status);
+
+      // Record suspend_time when transitioning to Suspended so that
+      // it is persisted together with the status change.
+      absl::Time prev_suspend_time = job->SuspendTime();
+      if (status == crane::grpc::Suspended) {
+        job->SetSuspendTime(absl::Now());
+      }
+
+      if (!g_embedded_db_client->UpdateRuntimeAttrOfJobIfExists(
+              0, job->JobDbId(), job->RuntimeAttr())) {
+        job->SetStatus(prev_status);
+        job->SetSuspendTime(prev_suspend_time);
+        CRANE_ERROR("Failed to persist status {} for job #{} during {}",
+                    static_cast<int>(status), job_id, failure_reason);
+        return false;
+      }
+
+      return true;
+    };
+
+    {
+      LockGuard running_guard(&m_running_job_map_mtx_);
+      auto iter = m_running_job_map_.find(job_id);
+      if (iter == m_running_job_map_.end()) {
+        CRANE_TRACE("Job #{} not in Rn queue for suspend", job_id);
+        results.emplace_back(CraneErrCode::ERR_NON_EXISTENT);
+        continue;
+      }
+
+      JobInCtld* job = iter->second.get();
+      if (job->Status() == crane::grpc::Suspended) {
+        CRANE_TRACE("Job #{} already suspended", job_id);
+        results.emplace_back(CraneErrCode::ERR_INVALID_PARAM);
+        continue;
+      }
+      if (job->Status() != crane::grpc::Running) {
+        CRANE_TRACE("Job #{} is not running (status {}) for suspend", job_id,
+                    static_cast<int>(job->Status()));
+        results.emplace_back(CraneErrCode::ERR_INVALID_PARAM);
+        continue;
+      }
+
+      executing_nodes = job->executing_craned_ids;
+    }
+
+    if (executing_nodes.empty()) {
+      CRANE_WARN("Job #{} has no executing craned when suspending", job_id);
+      results.emplace_back(CraneErrCode::ERR_INVALID_PARAM);
+      continue;
+    }
+
+    std::vector<CranedId> offline_nodes;
+    offline_nodes.reserve(executing_nodes.size());
+    for (const auto& craned_id : executing_nodes) {
+      if (!g_meta_container->CheckCranedOnline(craned_id)) {
+        offline_nodes.push_back(craned_id);
+      }
+    }
+
+    auto handle_failure = [&](CraneErrCode code, const char* failure_reason) {
+      CraneErrCode terminate_err =
+          TerminateRunningStep({{job_id, {kDaemonStepId}}});
+      if (terminate_err != CraneErrCode::SUCCESS &&
+          terminate_err != CraneErrCode::ERR_NON_EXISTENT) {
+        CRANE_ERROR("Failed to terminate job #{} after {} failure: {}", job_id,
+                    failure_reason, CraneErrStr(terminate_err));
+      }
+
+      for (const auto& craned_id : executing_nodes) {
+        StepStatusChangeAsync(
+            job_id, 0, craned_id, crane::grpc::JobStatus::Failed,
+            ExitCode::EC_RPC_ERR, "",
+            google::protobuf::util::TimeUtil::GetCurrentTime());
+      }
+
+      results.emplace_back(code);
+    };
+
+    if (!offline_nodes.empty()) {
+      // Ensure suspension only proceeds when every craned involved is online.
+      CRANE_WARN("Job #{} suspend skipped because craned(s) {} are offline.",
+                 job_id, absl::StrJoin(offline_nodes, ","));
+      handle_failure(CraneErrCode::ERR_RPC_FAILURE, "suspend");
+      continue;
+    }
+
+    std::vector<job_id_t> broadcast_job_ids{job_id};
+    CraneErrCode failure_code = CraneErrCode::SUCCESS;
+    bool has_failure = false;
+    Mutex result_mtx;
+
+    // Broadcast SuspendJobs via the thread pool and track successes/errors.
+    absl::BlockingCounter blocking_counter(executing_nodes.size());
+    for (const auto& craned_id : executing_nodes) {
+      g_thread_pool->detach_task([&, craned_id]() {
+        auto stub = g_craned_keeper->GetCranedStub(craned_id);
+        if (!stub || stub->Invalid()) {
+          CRANE_WARN("SuspendJobs stub for {} unavailable", craned_id);
+          {
+            LockGuard lock(&result_mtx);
+            if (failure_code == CraneErrCode::SUCCESS)
+              failure_code = CraneErrCode::ERR_RPC_FAILURE;
+            has_failure = true;
+          }
+          blocking_counter.DecrementCount();
+          return;
+        }
+
+        CraneErrCode err = stub->SuspendJobs(broadcast_job_ids);
+        if (err != CraneErrCode::SUCCESS) {
+          CRANE_ERROR("Failed to suspend job #{} on craned {}: {}", job_id,
+                      craned_id, CraneErrStr(err));
+          {
+            LockGuard lock(&result_mtx);
+            if (failure_code == CraneErrCode::SUCCESS) failure_code = err;
+            has_failure = true;
+          }
+        }
+
+        blocking_counter.DecrementCount();
+      });
+    }
+
+    blocking_counter.Wait();
+
+    if (has_failure) {
+      CRANE_ERROR(
+          "Job #{} suspend partially failed on node(s); abandoning job to "
+          "avoid inconsistent state.",
+          job_id);
+      handle_failure(failure_code, "suspend");
+      continue;
+    }
+
+    if (!persist_status(crane::grpc::Suspended, "suspend success")) {
+      results.emplace_back(CraneErrCode::ERR_GENERIC_FAILURE);
+      continue;
+    }
+
+    results.emplace_back(CraneErrCode::SUCCESS);
+  }
+  return results;
+}
+
+std::vector<CraneErrCode> JobScheduler::ResumeSuspendedJobs(
+    const std::vector<task_id_t>& job_ids) {
+  std::vector<CraneErrCode> results;
+  results.reserve(job_ids.size());
+  for (task_id_t job_id : job_ids) {
+    std::vector<CranedId> executing_nodes;
+    int64_t new_time_limit_secs = 0;
+
+    {
+      LockGuard running_guard(&m_running_job_map_mtx_);
+      auto iter = m_running_job_map_.find(job_id);
+      if (iter == m_running_job_map_.end()) {
+        CRANE_TRACE("Job #{} not in Rn queue for resume", job_id);
+        results.emplace_back(CraneErrCode::ERR_NON_EXISTENT);
+        continue;
+      }
+
+      JobInCtld* job = iter->second.get();
+      if (job->Status() != crane::grpc::Suspended) {
+        CRANE_TRACE("Job #{} is not suspended (status {}) for resume", job_id,
+                    static_cast<int>(job->Status()));
+        results.emplace_back(CraneErrCode::ERR_INVALID_PARAM);
+        continue;
+      }
+
+      executing_nodes = job->executing_craned_ids;
+
+      // Extend end_time BEFORE sending resume RPC to avoid race condition
+      // with StepStatusChangeAsyncCb_. If the job completes immediately
+      // after SIGCONT (e.g. sleep timer expired during suspension),
+      // the completion handler will already see the extended end_time
+      // since both code paths contend on m_running_job_map_mtx_.
+      // Formula: end_time = start_time + time_limit + suspended_time
+      if (job->SuspendTime() != absl::InfinitePast()) {
+        absl::Duration suspended_duration = absl::Now() - job->SuspendTime();
+        if (suspended_duration > absl::ZeroDuration()) {
+          job->SetEndTime(job->EndTime() + suspended_duration);
+          CRANE_INFO(
+              "Job #{} pre-resume: extended end_time by {:.1f}s "
+              "(suspended duration). New end_time: {}",
+              job_id, absl::ToDoubleSeconds(suspended_duration),
+              absl::FormatTime(job->EndTime()));
+        }
+        job->SetSuspendTime(absl::InfinitePast());
+        // Persist the updated end_time and reset suspend_time together.
+        g_embedded_db_client->UpdateRuntimeAttrOfJobIfExists(
+            0, job->JobDbId(), job->RuntimeAttr());
+      }
+      // Effective time limit for craned = end_time - start_time
+      // (includes original time_limit + total suspended time).
+      new_time_limit_secs =
+          absl::ToInt64Seconds(job->EndTime() - job->StartTime());
+    }
+
+    if (executing_nodes.empty()) {
+      CRANE_WARN("Job #{} has no executing craned when resuming", job_id);
+      results.emplace_back(CraneErrCode::ERR_INVALID_PARAM);
+      continue;
+    }
+
+    std::vector<CranedId> offline_nodes;
+    offline_nodes.reserve(executing_nodes.size());
+    for (const auto& craned_id : executing_nodes) {
+      if (!g_meta_container->CheckCranedOnline(craned_id)) {
+        offline_nodes.push_back(craned_id);
+      }
+    }
+
+    auto handle_failure = [&](CraneErrCode code, const char* failure_reason) {
+      CraneErrCode terminate_err =
+          TerminateRunningStep({{job_id, {kDaemonStepId}}});
+      if (terminate_err != CraneErrCode::SUCCESS &&
+          terminate_err != CraneErrCode::ERR_NON_EXISTENT) {
+        CRANE_ERROR("Failed to terminate job #{} after {} failure: {}", job_id,
+                    failure_reason, CraneErrStr(terminate_err));
+      }
+
+      for (const auto& craned_id : executing_nodes) {
+        StepStatusChangeAsync(
+            job_id, 0, craned_id, crane::grpc::JobStatus::Failed,
+            ExitCode::EC_RPC_ERR, "",
+            google::protobuf::util::TimeUtil::GetCurrentTime());
+      }
+
+      results.emplace_back(code);
+    };
+
+    if (!offline_nodes.empty()) {
+      CRANE_WARN("Job #{} resume skipped because craned(s) {} are offline.",
+                 job_id, absl::StrJoin(offline_nodes, ","));
+      handle_failure(CraneErrCode::ERR_RPC_FAILURE, "resume");
+      continue;
+    }
+
+    std::vector<job_id_t> broadcast_job_ids{job_id};
+    CraneErrCode failure_code = CraneErrCode::SUCCESS;
+    bool has_failure = false;
+    Mutex result_mtx;
+
+    // Broadcast ResumeJobs via the thread pool and track successes/errors.
+    absl::BlockingCounter blocking_counter(executing_nodes.size());
+    for (const auto& craned_id : executing_nodes) {
+      g_thread_pool->detach_task([&, craned_id]() {
+        auto stub = g_craned_keeper->GetCranedStub(craned_id);
+        if (!stub || stub->Invalid()) {
+          CRANE_WARN("ResumeJobs stub for {} unavailable", craned_id);
+          {
+            LockGuard lock(&result_mtx);
+            if (failure_code == CraneErrCode::SUCCESS)
+              failure_code = CraneErrCode::ERR_RPC_FAILURE;
+            has_failure = true;
+          }
+          blocking_counter.DecrementCount();
+          return;
+        }
+
+        CraneErrCode err = stub->ResumeJobs(broadcast_job_ids);
+        if (err != CraneErrCode::SUCCESS) {
+          CRANE_ERROR("Failed to resume job #{} on craned {}: {}", job_id,
+                      craned_id, CraneErrStr(err));
+          {
+            LockGuard lock(&result_mtx);
+            if (failure_code == CraneErrCode::SUCCESS) failure_code = err;
+            has_failure = true;
+          }
+        }
+
+        blocking_counter.DecrementCount();
+      });
+    }
+
+    blocking_counter.Wait();
+
+    if (has_failure) {
+      CRANE_ERROR(
+          "Job #{} resume partially failed on node(s); abandoning job to "
+          "avoid inconsistent state.",
+          job_id);
+      handle_failure(failure_code, "resume");
+      continue;
+    }
+
+    {
+      LockGuard running_guard(&m_running_job_map_mtx_);
+      auto iter = m_running_job_map_.find(job_id);
+      if (iter == m_running_job_map_.end()) {
+        // Job completed concurrently after resume RPC returned.
+        // end_time was already extended before the RPC (under the same
+        // lock), so the completion handler used the correct value.
+        CRANE_INFO(
+            "Job #{} completed concurrently after resume RPC; "
+            "end_time was pre-extended.",
+            job_id);
+        results.emplace_back(CraneErrCode::SUCCESS);
+        continue;
+      }
+
+      JobInCtld* job = iter->second.get();
+
+      if (job->Status() != crane::grpc::Running) {
+        auto prev_status = job->Status();
+        job->SetStatus(crane::grpc::Running);
+        if (!g_embedded_db_client->UpdateRuntimeAttrOfJobIfExists(
+                0, job->JobDbId(), job->RuntimeAttr())) {
+          job->SetStatus(prev_status);
+          CRANE_ERROR("Failed to persist resumed status for job #{}", job_id);
+          results.emplace_back(CraneErrCode::ERR_GENERIC_FAILURE);
+          continue;
+        }
+      }
+    }
+
+    // Notify all executing craned nodes about the effective time limit
+    // (end_time - start_time) so they can reset their termination timers.
+    for (const CranedId& craned_id : executing_nodes) {
+      auto stub = g_craned_keeper->GetCranedStub(craned_id);
+      if (stub && !stub->Invalid()) {
+        CraneErrCode err =
+            stub->ChangeJobTimeLimit(job_id, new_time_limit_secs);
+        if (err != CraneErrCode::SUCCESS) {
+          CRANE_WARN(
+              "Failed to update time limit of job #{} on craned {} "
+              "after resume: {}",
+              job_id, craned_id, CraneErrStr(err));
+        }
+      }
+    }
+
+    results.emplace_back(CraneErrCode::SUCCESS);
+  }
+  return results;
 }
 
 CraneErrCode JobScheduler::ChangeJobTimeLimit(job_id_t job_id, int64_t secs) {
@@ -2534,7 +2898,7 @@ std::expected<void, std::string> JobScheduler::CreateResv_(
       bool failed = false;
       for (job_id_t job_id : craned_meta->rn_job_res_map | std::views::keys) {
         const auto& job = m_running_job_map_.at(job_id);
-        absl::Time job_end_time = job->StartTime() + job->time_limit;
+        absl::Time job_end_time = job->EndTime();
 
         if (job_end_time > start_time) {
           nodes_conflicted.emplace_back(craned_id);
@@ -2938,7 +3302,7 @@ void JobScheduler::CleanCancelJobQueueCb_() {
           auto job_it = m_running_job_map_.find(job_id);
           if (job_it != m_running_job_map_.end()) {
             JobInCtld* job = job_it->second.get();
-            absl::Time timeout_time = job->StartTime() + job->time_limit;
+            absl::Time timeout_time = job->EndTime();
 
             // If job exceeded time limit, use timeout time as end_time
             if (current_time > timeout_time) {
@@ -3425,7 +3789,7 @@ void JobScheduler::CleanJobStatusChangeQueueCb_() {
       // by too much. Allow 5 seconds of floating tolerance.
       absl::Time end_time = absl::FromUnixSeconds(timestamp.seconds()) +
                             absl::Nanoseconds(timestamp.nanos());
-      absl::Time expected_end_time = job->StartTime() + job->time_limit;
+      absl::Time expected_end_time = job->EndTime();
 
       if (end_time > expected_end_time + absl::Seconds(kEndTimeToleranceSec)) {
         CRANE_WARN(
@@ -4018,7 +4382,7 @@ void JobScheduler::QueryRnJobOnCtldForNodeConfig(
 
     // Check if job has exceeded time limit during craned offline
     if (job->Status() == crane::grpc::JobStatus::Running &&
-        job->StartTime() + job->time_limit < now) {
+        job->EndTime() < now) {
       CRANE_INFO(
           "[Job #{}] Job exceeded time limit during craned {} offline. "
           "StartTime: {}, TimeLimit: {}s, Current: {}. "
@@ -4034,6 +4398,12 @@ void JobScheduler::QueryRnJobOnCtldForNodeConfig(
 
     // Send the current (possibly updated) status to craned
     step_status[daemon_step->StepId()] = daemon_step->Status();
+
+    // If the job is suspended, encode it in the daemon step status
+    // so that craned will re-freeze the cgroup during recovery.
+    if (job->Status() == crane::grpc::Suspended) {
+      step_status[daemon_step->StepId()] = crane::grpc::Suspended;
+    }
 
     if (job->PrimaryStep() &&
         std::ranges::contains(job->PrimaryStep()->ExecutionNodes(),

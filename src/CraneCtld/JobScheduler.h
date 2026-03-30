@@ -785,6 +785,11 @@ class JobScheduler {
 
   std::future<CraneErrCode> HoldReleaseJobAsync(job_id_t job_id, int64_t secs);
 
+  std::vector<CraneErrCode> SuspendRunningJobs(
+      const std::vector<task_id_t>& job_ids);
+  std::vector<CraneErrCode> ResumeSuspendedJobs(
+      const std::vector<task_id_t>& job_ids);
+
   CraneErrCode ChangeJobTimeLimit(job_id_t job_id, int64_t secs);
 
   CraneErrCode ChangeJobPriority(job_id_t job_id, double priority);

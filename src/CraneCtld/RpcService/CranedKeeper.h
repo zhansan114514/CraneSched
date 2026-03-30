@@ -91,6 +91,10 @@ class CranedStub {
 
   CraneErrCode ChangeJobTimeLimit(uint32_t job_id, uint64_t seconds);
 
+  CraneErrCode SuspendJobs(const std::vector<task_id_t> &job_ids);
+
+  CraneErrCode ResumeJobs(const std::vector<task_id_t> &job_ids);
+
   crane::grpc::AttachContainerStepReply AttachContainerStep(
       const crane::grpc::AttachContainerStepRequest &request);
 
