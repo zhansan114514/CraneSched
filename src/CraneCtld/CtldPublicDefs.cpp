@@ -969,6 +969,9 @@ void CommonStepInCtld::InitPrimaryStepFromJob(JobInCtld& job) {
   step.set_nodelist(job.JobToCtld().nodelist());
   step.set_task_prolog(job.JobToCtld().task_prolog());
   step.set_task_epilog(job.JobToCtld().task_epilog());
+  if (job.JobToCtld().has_array_task_id()) {
+    step.set_array_task_id(job.JobToCtld().array_task_id());
+  }
 
   *MutableStepToCtld() = std::move(step);
 }
@@ -1152,6 +1155,9 @@ crane::grpc::StepToD CommonStepInCtld::GetStepToD(
 
   step_to_d.set_task_prolog(task_prolog);
   step_to_d.set_task_epilog(task_epilog);
+  if (StepToCtld().has_array_task_id()) {
+    step_to_d.set_array_task_id(StepToCtld().array_task_id());
+  }
 
   return step_to_d;
 }

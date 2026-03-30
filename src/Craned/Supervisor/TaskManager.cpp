@@ -519,6 +519,13 @@ std::string ProcInstance::ParseFilePathPattern_(const std::string& pattern,
                        {"%x", m_parent_step_inst_->GetStep().name()}},
                       &resolved_path_pattern);
 
+  if (m_parent_step_inst_->GetStep().has_array_task_id()) {
+    absl::StrReplaceAll(
+        {{"%a",
+          std::to_string(m_parent_step_inst_->GetStep().array_task_id())}},
+        &resolved_path_pattern);
+  }
+
   return resolved_path_pattern;
 }
 
@@ -1763,6 +1770,7 @@ CraneErrCode ProcInstance::Prepare() {
     // Prepare file output name for batch tasks.
     /* Perform file name substitutions
      * %j - Job ID
+     * %a - Array task index
      * %u - Username
      * %x - Job name
      */
