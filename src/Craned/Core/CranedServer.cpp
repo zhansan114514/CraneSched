@@ -324,12 +324,12 @@ grpc::Status CranedServiceImpl::ChangeJobTimeLimit(
     return Status{grpc::StatusCode::UNAVAILABLE, "CranedServer is not ready"};
   }
 
-  auto err = g_job_mgr->ChangeStepTimelimit(request->job_id(), kPrimaryStepId,
-                                            request->time_limit_seconds());
+  auto err = g_job_mgr->ChangeAllStepsTimelimit(request->job_id(),
+                                                request->time_limit_seconds());
 
   if (err.error()) {
-    CRANE_ERROR("[Step #{}.{}] Failed to change job time limit",
-                request->job_id(), kPrimaryStepId);
+    CRANE_ERROR("[Job #{}] Failed to change time limit for all steps",
+                request->job_id());
     return Status::OK;
   }
   response->set_ok(true);

@@ -102,6 +102,9 @@ class JobManager {
 
   CraneExpected<void> ChangeStepTimelimit(job_id_t job_id, step_id_t step_id,
                                           int64_t new_timelimit_sec);
+
+  CraneExpected<void> ChangeAllStepsTimelimit(job_id_t job_id,
+                                              int64_t new_timelimit_sec);
   std::optional<JobInfoOfUid> QueryJobInfoOfUid(uid_t uid);
 
   bool MigrateProcToCgroupOfJob(pid_t pid, job_id_t job_id);
