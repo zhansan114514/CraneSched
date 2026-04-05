@@ -540,42 +540,6 @@ CraneErrCode JobManager::ExecuteStepAsync(
   return CraneErrCode::SUCCESS;
 }
 
-CraneExpected<void> JobManager::ChangeStepTimelimit(job_id_t job_id,
-                                                    step_id_t step_id,
-                                                    int64_t new_timelimit_sec) {
-  auto job = m_job_map_.GetValueExclusivePtr(job_id);
-  if (!job) {
-    CRANE_ERROR("[Step #{}.{}] Failed to find job allocation", job_id, step_id);
-    return std::unexpected{CraneErrCode::ERR_NON_EXISTENT};
-  }
-  absl::MutexLock lock(job->step_map_mtx.get());
-  auto step_it = job->step_map.find(step_id);
-  if (step_it == job->step_map.end()) {
-    CRANE_ERROR("[Step #{}.{}] Failed to find step allocation", job_id,
-                step_id);
-    return std::unexpected{CraneErrCode::ERR_NON_EXISTENT};
-  }
-  auto& stub = step_it->second->supervisor_stub;
-  if (!stub) {
-    CRANE_ERROR("[Step #{}.{}] Supervisor stub is null when changing timelimit",
-                job_id, step_id);
-    StepStatusChangeAsync(job_id, step_id, StepStatus::Failed,
-                          ExitCode::EC_RPC_ERR,
-                          "Supervisor stub is null when changing timelimit",
-                          google::protobuf::util::TimeUtil::GetCurrentTime());
-    return std::unexpected{CraneErrCode::ERR_RPC_FAILURE};
-  }
-  auto err = stub->ChangeStepTimeLimit(absl::Seconds(new_timelimit_sec));
-  if (err != CraneErrCode::SUCCESS) {
-    CRANE_ERROR(
-        "[Step #{}.{}] Failed to change step timelimit to {} seconds via "
-        "supervisor RPC",
-        job_id, step_id, new_timelimit_sec);
-    return std::unexpected{err};
-  }
-  return {};
-}
-
 CraneExpected<void> JobManager::ChangeAllStepsTimelimit(
     job_id_t job_id, int64_t new_timelimit_sec) {
   auto job = m_job_map_.GetValueExclusivePtr(job_id);

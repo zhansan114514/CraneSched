@@ -100,9 +100,6 @@ class JobManager {
   CraneErrCode ExecuteStepAsync(
       std::unordered_map<job_id_t, std::unordered_set<step_id_t>>&& steps);
 
-  CraneExpected<void> ChangeStepTimelimit(job_id_t job_id, step_id_t step_id,
-                                          int64_t new_timelimit_sec);
-
   CraneExpected<void> ChangeAllStepsTimelimit(job_id_t job_id,
                                               int64_t new_timelimit_sec);
   std::optional<JobInfoOfUid> QueryJobInfoOfUid(uid_t uid);
