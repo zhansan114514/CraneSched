@@ -821,7 +821,7 @@ bool MongodbClient::FetchJobRecords(
   // 25 submit_line   exit_code      username       qos           get_user_env
   // 30 type          extra_attr     reservation    exclusive     cpus_alloc
   // 35 mem_alloc     device_map     meta_pod       meta_container has_job_info
-  // 40 nodename_list wckey          submit_hostname array_* fields
+  // 40 nodename_list wckey          submit_hostname array_task_id parent_job_id
   try {
     for (auto view : cursor) {
       job_id_t job_id = view["job_id"].get_int32().value;
@@ -904,18 +904,6 @@ bool MongodbClient::FetchJobRecords(
         job_info.set_submit_hostname(
             view["submit_hostname"].get_string().value);
 
-        if (auto field = view["array_index_start"]; field) {
-          auto value = ViewGetArithmeticValue_<int64_t>(field);
-          if (value >= 0) {
-            job_info.set_array_index_start(static_cast<uint32_t>(value));
-          }
-        }
-        if (auto field = view["array_index_end"]; field) {
-          auto value = ViewGetArithmeticValue_<int64_t>(field);
-          if (value >= 0) {
-            job_info.set_array_index_end(static_cast<uint32_t>(value));
-          }
-        }
         if (auto field = view["array_task_id"]; field) {
           auto value = ViewGetArithmeticValue_<int64_t>(field);
           if (value >= 0) {
@@ -929,8 +917,8 @@ bool MongodbClient::FetchJobRecords(
           }
         }
 
-        if (view["req_node"])
-          for (auto& craned_id : view["req_node"].get_array().value) {
+        if (view["req_nodes"])
+          for (auto& craned_id : view["req_nodes"].get_array().value) {
             job_info.add_req_nodes(craned_id.get_string().value.data());
           }
         if (view["exclude_nodes"])
@@ -4327,15 +4315,7 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
 
   std::string env_str = bsoncxx::to_json(env_doc.view());
 
-  int32_t array_index_start = -1;
-  int32_t array_index_end = -1;
   int32_t array_task_id = -1;
-  if (job_to_ctld.has_array_index_start()) {
-    array_index_start = static_cast<int32_t>(job_to_ctld.array_index_start());
-  }
-  if (job_to_ctld.has_array_index_end()) {
-    array_index_end = static_cast<int32_t>(job_to_ctld.array_index_end());
-  }
   if (job_to_ctld.has_array_task_id()) {
     array_task_id = static_cast<int32_t>(job_to_ctld.array_task_id());
   }
@@ -4380,10 +4360,10 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
   // 30 type          extra_attr     reservation   exclusive   cpus_alloc
   // 35 mem_alloc     device_map     meta_pod      meta_container has_job_info
   // 40 licenses_alloc nodename_list wckey        using_default_wckey cluster
-  // 45 array_index_start array_index_end array_task_id submit_hostname
-  // 49 req_nodes exclude_nodes execution_nodes parent_job_id
+  // 45 array_task_id submit_hostname
+  // 47 req_nodes exclude_nodes execution_nodes parent_job_id
   // clang-format off
-  std::array<std::string, 53> fields{
+  std::array<std::string, 51> fields{
     // 0 - 4
     "job_id",  "job_db_id", "mod_time",    "deleted",  "account",
     // 5 - 9
@@ -4402,9 +4382,9 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
     "mem_alloc", "device_map", "meta_pod","meta_container", "has_job_info",
     // 40 - 44
     "licenses_alloc", "nodename_list", "wckey", "using_default_wckey","cluster",
-    // 45 - 48
-    "array_index_start", "array_index_end", "array_task_id", "submit_hostname",
-    // 49 - 52
+    // 45 - 46
+    "array_task_id", "submit_hostname",
+    // 47 - 50
     "req_nodes", "exclude_nodes", "execution_nodes", "parent_job_id"
   };
   // clang-format on
@@ -4420,9 +4400,9 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
              std::optional<ContainerMetaInJob>, bool,               /*38-39*/
              std::unordered_map<std::string, uint32_t>,             /*40*/
              bsoncxx::array::value, std::string, bool, std::string, /*41-44*/
-                  int32_t, int32_t, int32_t, std::string,                /*45-48*/
-                  std::list<CranedId>, std::list<CranedId>,              /*49-50*/
-                  std::vector<CranedId>, int32_t>                        /*51-52*/
+             int32_t, std::string,                                  /*45-46*/
+             std::list<CranedId>, std::list<CranedId>,              /*47-48*/
+             std::vector<CranedId>, int32_t>                        /*49-50*/
       values{
           // 0-4
           static_cast<int32_t>(runtime_attr.job_id()), runtime_attr.job_db_id(),
@@ -4460,12 +4440,11 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
               runtime_attr.actual_licenses().end()},
           bsoncxx::array::value{nodename_list_array.view()},
           job_to_ctld.wckey(), using_default_wckey, g_config.CraneClusterName,
-          // 45-48
-          array_index_start, array_index_end, array_task_id,
-          job_to_ctld.submit_hostname(),
-          // 49-51
+          // 45-46
+          array_task_id, job_to_ctld.submit_hostname(),
+          // 47-49
           req_node_list, exclude_node_list, execution_nodes,
-          // 52
+          // 50
           runtime_attr.has_parent_job_id()
               ? static_cast<int32_t>(runtime_attr.parent_job_id())
               : int32_t{-1}};
@@ -4534,16 +4513,7 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
 
   std::string env_str = bsoncxx::to_json(env_doc.view());
 
-  int32_t array_index_start = -1;
-  int32_t array_index_end = -1;
   int32_t array_task_id = -1;
-  if (job->JobToCtld().has_array_index_start()) {
-    array_index_start =
-        static_cast<int32_t>(job->JobToCtld().array_index_start());
-  }
-  if (job->JobToCtld().has_array_index_end()) {
-    array_index_end = static_cast<int32_t>(job->JobToCtld().array_index_end());
-  }
   if (job->JobToCtld().has_array_task_id()) {
     array_task_id = static_cast<int32_t>(job->JobToCtld().array_task_id());
   }
@@ -4557,11 +4527,11 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
   // 30 type          extra_attr     reservation    exclusive  cpus_alloc
   // 35 mem_alloc     device_map     meta_pod     meta_container has_job_info
   // 40 licenses_alloc nodename_list wckey  using_default_wckey cluster
-  // 45 array_index_start array_index_end array_task_id submit_hostname
-  // 49 req_nodes exclude_nodes execution_nodes
+  // 45 array_task_id submit_hostname
+  // 47 req_nodes exclude_nodes execution_nodes
 
   // clang-format off
-  std::array<std::string, 53> fields{
+  std::array<std::string, 51> fields{
       // 0 - 4
       "job_id",  "job_db_id", "mod_time",    "deleted",  "account",
       // 5 - 9
@@ -4580,18 +4550,18 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
       "mem_alloc", "device_map", "meta_pod", "meta_container", "has_job_info",
       // 40 - 44
       "licenses_alloc", "nodename_list", "wckey", "using_default_wckey","cluster",
-        // 45 - 48
-        "array_index_start", "array_index_end", "array_task_id", "submit_hostname",
-        // 49 - 51
-        "req_nodes", "exclude_nodes", "execution_nodes",
-        // 52
-        "parent_job_id"
+      // 45 - 46
+      "array_task_id", "submit_hostname",
+      // 47 - 49
+      "req_nodes", "exclude_nodes", "execution_nodes",
+      // 50
+      "parent_job_id"
   };
   // clang-format on
 
   int32_t parent_job_id_val = -1;
-  if (job->parent_job_id.has_value()) {
-    parent_job_id_val = static_cast<int32_t>(job->parent_job_id.value());
+  if (job->ParentJobId().has_value()) {
+    parent_job_id_val = static_cast<int32_t>(job->ParentJobId().value());
   }
 
   std::tuple<int32_t, job_db_id_t, int64_t, bool, std::string,      /*0-4*/
@@ -4603,12 +4573,12 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
              int32_t, std::string, std::string, bool, double,       /*30-34*/
              int64_t, DeviceMap, std::optional<PodMetaInJob>,       /*35-37*/
              std::optional<ContainerMetaInJob>, bool,               /*38-39*/
-                  std::unordered_map<std::string, uint32_t>,             /*40*/
-                  std::vector<CranedId>, std::string, bool, std::string, /*41-44*/
-                  int32_t, int32_t, int32_t, std::string,                /*45-48*/
-                  std::unordered_set<CranedId>,                          /*49*/
-                  std::unordered_set<CranedId>, std::vector<CranedId>,   /*50-51*/
-                  int32_t>                                               /*52*/
+             std::unordered_map<std::string, uint32_t>,             /*40*/
+             std::vector<CranedId>, std::string, bool, std::string, /*41-44*/
+             int32_t, std::string,                                  /*45-46*/
+             std::unordered_set<CranedId>,                          /*47*/
+             std::unordered_set<CranedId>, std::vector<CranedId>,   /*48-49*/
+             int32_t>                                               /*50*/
       values{                                                       // 0-4
              static_cast<int32_t>(job->JobId()), job->JobDbId(),
              absl::ToUnixSeconds(absl::Now()), false, job->account,
@@ -4638,13 +4608,12 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
              // 40-44
              job->licenses_count, job->CranedIds(), job->wckey,
              job->using_default_wckey, g_config.CraneClusterName,
-             // 45-48
-             array_index_start, array_index_end, array_task_id,
-             job->submit_hostname,
-             // 49-51
+             // 45-46
+             array_task_id, job->submit_hostname,
+             // 47-49
              job->included_nodes, job->excluded_nodes,
              job->executing_craned_ids,
-             // 52
+             // 50
              parent_job_id_val};
 
   return DocumentConstructor_(fields, values);

@@ -969,9 +969,6 @@ void CommonStepInCtld::InitPrimaryStepFromJob(JobInCtld& job) {
   step.set_nodelist(job.JobToCtld().nodelist());
   step.set_task_prolog(job.JobToCtld().task_prolog());
   step.set_task_epilog(job.JobToCtld().task_epilog());
-  if (job.JobToCtld().has_array_task_id()) {
-    step.set_array_task_id(job.JobToCtld().array_task_id());
-  }
 
   *MutableStepToCtld() = std::move(step);
 }
@@ -1155,9 +1152,6 @@ crane::grpc::StepToD CommonStepInCtld::GetStepToD(
 
   step_to_d.set_task_prolog(task_prolog);
   step_to_d.set_task_epilog(task_epilog);
-  if (StepToCtld().has_array_task_id()) {
-    step_to_d.set_array_task_id(StepToCtld().array_task_id());
-  }
 
   return step_to_d;
 }
@@ -1543,6 +1537,16 @@ void JobInCtld::SetHeld(bool val) {
   runtime_attr.set_held(val);
 }
 
+void JobInCtld::SetFirstChildJobId(job_id_t val) {
+  first_child_job_id = val;
+  runtime_attr.set_first_child_job_id(val);
+}
+
+void JobInCtld::SetParentJobId(job_id_t val) {
+  parent_job_id = val;
+  runtime_attr.set_parent_job_id(val);
+}
+
 void JobInCtld::SetCachedPriority(double val) {
   cached_priority = val;
   runtime_attr.set_cached_priority(val);
@@ -1725,9 +1729,6 @@ void JobInCtld::SetFieldsByRuntimeAttrOfJob(
   if (runtime_attr.has_first_child_job_id()) {
     first_child_job_id = runtime_attr.first_child_job_id();
   }
-  if (runtime_attr.has_array_expanded()) {
-    array_expanded = runtime_attr.array_expanded();
-  }
 }
 
 void JobInCtld::SetFieldsOfJobInfo(crane::grpc::JobInfo* job_info) {
@@ -1760,12 +1761,6 @@ void JobInCtld::SetFieldsOfJobInfo(crane::grpc::JobInfo* job_info) {
 
   job_info->set_submit_hostname(submit_hostname);
 
-  if (job_to_ctld.has_array_index_start()) {
-    job_info->set_array_index_start(job_to_ctld.array_index_start());
-  }
-  if (job_to_ctld.has_array_index_end()) {
-    job_info->set_array_index_end(job_to_ctld.array_index_end());
-  }
   if (job_to_ctld.has_array_task_id()) {
     job_info->set_array_task_id(job_to_ctld.array_task_id());
   }
