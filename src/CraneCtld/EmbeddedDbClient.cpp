@@ -1037,8 +1037,8 @@ bool EmbeddedDbClient::AppendJobsToPendingAndAdvanceJobIds(
   return true;
 }
 
-bool EmbeddedDbClient::AppendChildJobsToDb(
-    const std::vector<JobInCtld*>& jobs, JobInCtld* parent) {
+bool EmbeddedDbClient::AppendChildJobsToDb(const std::vector<JobInCtld*>& jobs,
+                                           JobInCtld* parent) {
   txn_id_t txn_id;
   std::expected<void, DbErrorCode> result;
 
@@ -1051,9 +1051,8 @@ bool EmbeddedDbClient::AppendChildJobsToDb(
                               GetFixedDbEntryName_(job->JobDbId()),
                               &job->JobToCtld());
     if (!result) {
-      CRANE_ERROR(
-          "Failed to store fixed data of child job id: {} / db id: {}.",
-          job->JobId(), job->JobDbId());
+      CRANE_ERROR("Failed to store fixed data of child job id: {} / db id: {}.",
+                  job->JobId(), job->JobDbId());
       return false;
     }
   }
