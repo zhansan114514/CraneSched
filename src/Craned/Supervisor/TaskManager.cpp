@@ -521,8 +521,7 @@ std::string ProcInstance::ParseFilePathPattern_(const std::string& pattern,
 
   if (m_parent_step_inst_->GetStep().has_array_job_id()) {
     absl::StrReplaceAll(
-        {{"%a",
-          std::to_string(m_parent_step_inst_->GetStep().array_job_id())}},
+        {{"%a", std::to_string(m_parent_step_inst_->GetStep().array_job_id())}},
         &resolved_path_pattern);
   }
 
