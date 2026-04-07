@@ -683,24 +683,27 @@ bool MongodbClient::FetchJobRecords(
   }
 
   bool has_job_ids_constraint = !request->filter_ids().empty();
-  bool has_array_task_constraint = !request->filter_array_task_ids().empty();
+  bool has_array_job_constraint = !request->filter_array_job_ids().empty();
 
-  if (has_job_ids_constraint || has_array_task_constraint) {
-    // When both job_id and array_task filters are present, we need an $or:
+  if (!has_job_ids_constraint && has_array_job_constraint) {
+    // Array child filtering must be scoped by explicit parent job_ids.
+    filter.append(kvp("job_id", -1));
+  } else if (has_job_ids_constraint) {
+    // When both job_id and array_job filters are present, we need an $or:
     //   - Non-array jobs matched by job_id directly
-    //   - Array children matched by parent_job_id + array_task_id
-    // Without array_task filter, just use job_id $in as before.
-    if (has_array_task_constraint) {
-      // ALL parent IDs in filter_array_task_ids are excluded from the
-      // direct job_id match, regardless of whether their task list is
-      // empty.  An empty task list means "match no children" — the
+    //   - Array children matched by parent_job_id + array_job_id
+    // Without array_job filter, just use job_id $in as before.
+    if (has_array_job_constraint) {
+      // ALL parent IDs in filter_array_job_ids are excluded from the
+      // direct job_id match, regardless of whether their array_job_id
+      // list is empty. An empty list means "match no children" — the
       // parent itself must not leak into the results either.
       std::unordered_set<uint32_t> parent_ids_with_task_filter;
-      bool has_any_array_tasks = false;
-      for (const auto& [pid, task_ids] : request->filter_array_task_ids()) {
+      bool has_any_array_job_ids = false;
+      for (const auto& [pid, array_job_ids] : request->filter_array_job_ids()) {
         parent_ids_with_task_filter.insert(pid);
-        if (!task_ids.array_task_ids().empty()) {
-          has_any_array_tasks = true;
+        if (!array_job_ids.array_job_ids().empty()) {
+          has_any_array_job_ids = true;
         }
       }
 
@@ -716,7 +719,7 @@ bool MongodbClient::FetchJobRecords(
       }
 
       // Guard: only build $or if at least one branch will be non-empty.
-      if (has_non_array_job_ids || has_any_array_tasks) {
+      if (has_non_array_job_ids || has_any_array_job_ids) {
         filter.append(kvp("$or", [&](sub_array or_array) {
           // Branch 1: Non-array-filtered job_ids (direct match).
           if (has_non_array_job_ids) {
@@ -734,27 +737,29 @@ bool MongodbClient::FetchJobRecords(
             });
           }
 
-          // Branch 2: Array children matched by parent_job_id + task_id.
-          for (const auto& [parent_id, task_ids] :
-               request->filter_array_task_ids()) {
-            for (const auto& task_id : task_ids.array_task_ids()) {
+          // Branch 2: Array children matched by parent_job_id +
+          // array_job_id.
+          for (const auto& [parent_id, array_job_ids] :
+               request->filter_array_job_ids()) {
+            for (const auto& array_job_id : array_job_ids.array_job_ids()) {
               or_array.append([&](sub_document match_doc) {
                 match_doc.append(
                     kvp("parent_job_id", static_cast<std::int32_t>(parent_id)));
                 match_doc.append(
-                    kvp("array_task_id", static_cast<std::int32_t>(task_id)));
+                    kvp("array_job_id",
+                        static_cast<std::int32_t>(array_job_id)));
               });
             }
           }
         }));
       } else {
-        // Both branches are empty (e.g. filter_array_task_ids had keys
-        // but all with empty task lists). Add an impossible condition
+        // Both branches are empty (e.g. filter_array_job_ids had keys
+        // but all with empty array_job_id lists). Add an impossible condition
         // so the query returns zero results instead of a wide scan.
         filter.append(kvp("job_id", -1));
       }
     } else {
-      // No array_task filter: simple job_id $in.
+      // No array_job filter: simple job_id $in.
       filter.append(kvp("job_id", [&request](sub_document job_id_doc) {
         array job_id_array;
         for (const auto& job_id : request->filter_ids() | std::views::keys) {
@@ -818,7 +823,7 @@ bool MongodbClient::FetchJobRecords(
   // 25 submit_line   exit_code      username       qos           get_user_env
   // 30 type          extra_attr     reservation    exclusive     cpus_alloc
   // 35 mem_alloc     device_map     meta_pod       meta_container has_job_info
-  // 40 nodename_list wckey          submit_hostname array_task_id parent_job_id
+  // 40 nodename_list wckey          submit_hostname array_job_id parent_job_id
   try {
     for (auto view : cursor) {
       job_id_t job_id = view["job_id"].get_int32().value;
@@ -901,10 +906,10 @@ bool MongodbClient::FetchJobRecords(
         job_info.set_submit_hostname(
             view["submit_hostname"].get_string().value);
 
-        if (auto field = view["array_task_id"]; field) {
+        if (auto field = view["array_job_id"]; field) {
           auto value = ViewGetArithmeticValue_<int64_t>(field);
           if (value >= 0) {
-            job_info.set_array_task_id(static_cast<uint32_t>(value));
+            job_info.set_array_job_id(static_cast<uint32_t>(value));
           }
         }
         if (auto field = view["parent_job_id"]; field) {
@@ -4312,9 +4317,9 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
 
   std::string env_str = bsoncxx::to_json(env_doc.view());
 
-  int32_t array_task_id = -1;
-  if (job_to_ctld.has_array_task_id()) {
-    array_task_id = static_cast<int32_t>(job_to_ctld.array_task_id());
+  int32_t array_job_id = -1;
+  if (job_to_ctld.has_array_job_id()) {
+    array_job_id = static_cast<int32_t>(job_to_ctld.array_job_id());
   }
 
   bsoncxx::builder::basic::array nodename_list_array;
@@ -4357,7 +4362,7 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
   // 30 type          extra_attr     reservation   exclusive   cpus_alloc
   // 35 mem_alloc     device_map     meta_pod      meta_container has_job_info
   // 40 licenses_alloc nodename_list wckey        using_default_wckey cluster
-  // 45 array_task_id submit_hostname
+  // 45 array_job_id submit_hostname
   // 47 req_nodes exclude_nodes execution_nodes parent_job_id
   // clang-format off
   std::array<std::string, 51> fields{
@@ -4380,7 +4385,7 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
     // 40 - 44
     "licenses_alloc", "nodename_list", "wckey", "using_default_wckey","cluster",
     // 45 - 46
-    "array_task_id", "submit_hostname",
+    "array_job_id", "submit_hostname",
     // 47 - 50
     "req_nodes", "exclude_nodes", "execution_nodes", "parent_job_id"
   };
@@ -4438,7 +4443,7 @@ MongodbClient::document MongodbClient::JobInEmbeddedDbToDocument_(
           bsoncxx::array::value{nodename_list_array.view()},
           job_to_ctld.wckey(), using_default_wckey, g_config.CraneClusterName,
           // 45-46
-          array_task_id, job_to_ctld.submit_hostname(),
+          array_job_id, job_to_ctld.submit_hostname(),
           // 47-49
           req_node_list, exclude_node_list, execution_nodes,
           // 50
@@ -4510,9 +4515,9 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
 
   std::string env_str = bsoncxx::to_json(env_doc.view());
 
-  int32_t array_task_id = -1;
-  if (job->JobToCtld().has_array_task_id()) {
-    array_task_id = static_cast<int32_t>(job->JobToCtld().array_task_id());
+  int32_t array_job_id = -1;
+  if (job->JobToCtld().has_array_job_id()) {
+    array_job_id = static_cast<int32_t>(job->JobToCtld().array_job_id());
   }
 
   // 0  job_id        job_db_id      mod_time       deleted       account
@@ -4524,7 +4529,7 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
   // 30 type          extra_attr     reservation    exclusive  cpus_alloc
   // 35 mem_alloc     device_map     meta_pod     meta_container has_job_info
   // 40 licenses_alloc nodename_list wckey  using_default_wckey cluster
-  // 45 array_task_id submit_hostname
+  // 45 array_job_id submit_hostname
   // 47 req_nodes exclude_nodes execution_nodes
 
   // clang-format off
@@ -4548,7 +4553,7 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
       // 40 - 44
       "licenses_alloc", "nodename_list", "wckey", "using_default_wckey","cluster",
       // 45 - 46
-      "array_task_id", "submit_hostname",
+      "array_job_id", "submit_hostname",
       // 47 - 49
       "req_nodes", "exclude_nodes", "execution_nodes",
       // 50
@@ -4606,7 +4611,7 @@ MongodbClient::document MongodbClient::JobInCtldToDocument_(JobInCtld* job) {
              job->licenses_count, job->CranedIds(), job->wckey,
              job->using_default_wckey, g_config.CraneClusterName,
              // 45-46
-             array_task_id, job->submit_hostname,
+             array_job_id, job->submit_hostname,
              // 47-49
              job->included_nodes, job->excluded_nodes,
              job->executing_craned_ids,

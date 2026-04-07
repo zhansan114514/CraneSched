@@ -245,8 +245,8 @@ message JobToCtld {
   optional uint32 array_index_start = 53;
   optional uint32 array_index_end = 54;
   optional uint32 array_index_stride = 56;
-  // The concrete index of this task after expansion.
-  optional uint32 array_task_id = 55;
+  // The concrete index of this job after expansion.
+  optional uint32 array_job_id = 55;
 }
 
 message JobInEmbeddedDb {
@@ -285,6 +285,10 @@ message RuntimeAttrOfJob {
   // For array parents: the first child's pre-allocated job_id.
   // Children IDs are sequential: first_child_job_id, first_child_job_id+1, ...
   optional uint32 first_child_job_id = 25;
+
+  // For array parents: the first child's pre-allocated job_db_id.
+  // Children DB IDs are sequential starting from first_child_job_db_id.
+  optional int64 first_child_job_db_id = 26;
 }
 
 message StepToCtld {
@@ -436,7 +440,7 @@ message StepToD {
   string task_epilog = 31;
   repeated Signal signals = 32;
 
-  optional uint32 array_task_id = 35;
+  optional uint32 array_job_id = 35;
 
   // task_node_list[task_id] = index of the node in nodelist that owns this task.
   // Size equals ntasks. Provides the authoritative task_id -> node_idx mapping.
@@ -453,8 +457,8 @@ message JobStepIds {
   repeated uint32 steps = 1;
 }
 
-message ArrayTaskIds {
-  repeated uint32 array_task_ids = 1;
+message ArrayJobIds {
+  repeated uint32 array_job_ids = 1;
 }
 
 message BatchJobAdditionalMeta {
@@ -632,8 +636,8 @@ message JobInfo {
   uint32 ntasks = 44;
 
   // Array metadata for query/display.
-  // For array children: the specific task index.
-  optional uint32 array_task_id = 47;
+  // For array children: the specific job index.
+  optional uint32 array_job_id = 47;
 
   // For array children: parent job's job_id.
   optional uint32 parent_job_id = 48;
