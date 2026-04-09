@@ -519,11 +519,14 @@ std::string ProcInstance::ParseFilePathPattern_(const std::string& pattern,
                        {"%x", m_parent_step_inst_->GetStep().name()}},
                       &resolved_path_pattern);
 
-  if (m_parent_step_inst_->GetStep().has_array_job_id()) {
-    absl::StrReplaceAll(
-        {{"%a", std::to_string(m_parent_step_inst_->GetStep().array_job_id())}},
-        &resolved_path_pattern);
-  }
+  const auto& step = m_parent_step_inst_->GetStep();
+  const uint32_t array_job_id =
+      step.has_array_job_id() ? step.array_job_id() : g_config.JobId;
+  const uint32_t array_task_id =
+      step.has_array_task_id() ? step.array_task_id() : 4294967294u;
+  absl::StrReplaceAll({{"%A", std::to_string(array_job_id)},
+                       {"%a", std::to_string(array_task_id)}},
+                      &resolved_path_pattern);
 
   return resolved_path_pattern;
 }
@@ -1768,8 +1771,9 @@ CraneErrCode ProcInstance::Prepare() {
   } else {
     // Prepare file output name for batch tasks.
     /* Perform file name substitutions
-     * %j - Job ID
+     * %A - Array parent job ID
      * %a - Array task index
+     * %j - Job ID
      * %u - Username
      * %x - Job name
      */

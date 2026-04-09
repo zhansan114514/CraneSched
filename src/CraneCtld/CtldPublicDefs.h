@@ -850,18 +850,30 @@ struct JobInCtld {
 
   std::string submit_hostname;
 
-  // Returns true if this is an array parent (has array range but no
-  // array_job_id).
+  // Returns true if this is an array parent (has array range but no concrete
+  // child task index).
   bool IsArrayParent() const {
     return job_to_ctld.has_array_index_start() &&
-           job_to_ctld.has_array_index_end() && !job_to_ctld.has_array_job_id();
+           job_to_ctld.has_array_index_end() &&
+           !job_to_ctld.has_array_task_id();
   }
 
   // Returns true if this is an expanded array child.
   bool IsArrayChild() const { return parent_job_id.has_value(); }
 
-  uint32_t ArrayJobCount() const {
-    if (!IsArrayParent()) return 0;
+  template <typename ChildExistsFn>
+  bool HasExpandedArrayChildren(const ChildExistsFn& child_exists) const {
+    if (!IsArrayParent() || FirstChildJobId() == 0) {
+      return false;
+    }
+    return child_exists(FirstChildJobId());
+  }
+
+  uint32_t ArrayTaskCount() const {
+    if (!job_to_ctld.has_array_index_start() ||
+        !job_to_ctld.has_array_index_end()) {
+      return 0;
+    }
     uint32_t stride = job_to_ctld.has_array_index_stride()
                           ? job_to_ctld.array_index_stride()
                           : 1;
@@ -870,6 +882,25 @@ struct JobInCtld {
         job_to_ctld.array_index_end() - job_to_ctld.array_index_start();
     return range / stride + 1;
   }
+
+  uint32_t ArrayJobCount() const {
+    if (!IsArrayParent()) return 0;
+    return ArrayTaskCount();
+  }
+
+  struct ArrayTaskMeta {
+    job_id_t parent_job_id;
+    uint32_t task_id;
+    uint32_t task_count;
+    uint32_t task_min;
+    uint32_t task_max;
+    uint32_t task_step;
+  };
+
+  std::optional<ArrayTaskMeta> GetArrayTaskMeta() const;
+  std::vector<std::unique_ptr<JobInCtld>> CreateExpandedArrayChildren() const;
+  std::vector<job_id_t> ResolveArrayTaskIdsToChildJobs(
+      const google::protobuf::RepeatedField<uint32_t>& array_task_ids) const;
 
  private:
   /* ------------- [2] -------------
@@ -918,9 +949,9 @@ struct JobInCtld {
   ResourceV2 allocated_res;
 
   // Array job tracking fields.
-  // For array parents: the first child's pre-allocated job_id.
+  // For array parents: the first expanded child's job_id.
   job_id_t first_child_job_id{0};
-  // For array parents: the first child's pre-allocated job_db_id.
+  // For array parents: the first expanded child's job_db_id.
   job_db_id_t first_child_job_db_id{0};
   // For array children: the parent array job's job_id.
   std::optional<job_id_t> parent_job_id;
