@@ -275,17 +275,12 @@ message RuntimeAttrOfJob {
   uint32 primary_step_exit_code = 22;
   map<string, uint32> actual_licenses = 23;
 
-  // For array children: the parent job's job_id.
+  // For array children: the array parent/anchor job_id.
   // If set, this job is an expanded array task.
-  optional uint32 parent_job_id = 24;
+  optional uint32 array_job_id = 24;
 
-  // For array parents: the first expanded child's job_id.
-  // Children IDs are sequential: first_child_job_id, first_child_job_id+1, ...
-  optional uint32 first_child_job_id = 25;
-
-  // For array parents: the first expanded child's job_db_id.
-  // Children DB IDs are sequential starting from first_child_job_db_id.
-  optional int64 first_child_job_db_id = 26;
+  // For array parents: whether child jobs have been materialized.
+  optional bool array_children_expanded = 27;
 }
 
 message StepToCtld {
@@ -645,14 +640,11 @@ message JobInfo {
   uint32 ntasks = 44;
 
   // Array metadata for query/display.
+  // For array children: the array parent/anchor job_id.
+  optional uint32 array_job_id = 45;
+
   // For array children: the specific array task index.
-  optional uint32 array_task_id = 47;
-
-  // Compatibility alias for the array parent/anchor job id.
-  optional uint32 parent_job_id = 48;
-
-  // Slurm-consistent name for the array parent/anchor job id.
-  optional uint32 array_job_id = 49;
+  optional uint32 array_task_id = 46;
 }
 
 message StepInfo {
